@@ -81,33 +81,55 @@ if ! command -v curl &> /dev/null; then
   apt-get install -y -qq curl
 fi
 
-# ─── Шаг 2: Клонирование из GitHub ────────────────────────────────────────────
-section "2. Клонирование репозитория"
+# ─── Шаг 2: Получение кода ───────────────────────────────────────────────────
+section "2. Получение кода"
 
 # Останавливаем старый процесс
 pm2 delete "${PM2_APP_NAME}" 2>/dev/null || true
 
-# Удаляем старую версию (сохраняем .env если есть)
-if [[ -d "${INSTALL_DIR}" ]]; then
-  log_warn "Директория ${INSTALL_DIR} существует"
+# Проверяем, запущены ли мы уже изнутри репозитория
+CURRENT_DIR=$(pwd)
+IS_INSIDE_REPO=false
+
+if [[ -d "${CURRENT_DIR}/.git" ]] && git remote -v 2>/dev/null | grep -q "SergeyIlins/telphin-bizru-integration"; then
+  IS_INSIDE_REPO=true
+  INSTALL_DIR="${CURRENT_DIR}"
+  log_info "Обнаружен локальный репозиторий, обновляю через git pull..."
+  git pull origin main
+elif [[ -d "${INSTALL_DIR}/.git" ]]; then
+  IS_INSIDE_REPO=true
+  INSTALL_DIR="${INSTALL_DIR}"
+  log_info "Обнаружен репозиторий в ${INSTALL_DIR}, обновляю..."
+  cd "${INSTALL_DIR}"
+  git pull origin main
+else
+  # Чистая установка — клонируем
+  log_info "Клонирование из GitHub..."
+
+  # Сохраняем .env если есть
   if [[ -f "${INSTALL_DIR}/.env" ]]; then
     log_info "Сохраняю .env..."
     cp "${INSTALL_DIR}/.env" /tmp/telphin-env-backup
   fi
-  rm -rf "${INSTALL_DIR}"
+
+  # Удаляем старую директорию (только если мы НЕ внутри неё)
+  if [[ -d "${INSTALL_DIR}" ]] && [[ "${CURRENT_DIR}" != "${INSTALL_DIR}"* ]]; then
+    rm -rf "${INSTALL_DIR}"
+  fi
+
+  # Клонируем
+  git clone "${REPO_URL}" "${INSTALL_DIR}"
+  cd "${INSTALL_DIR}"
+
+  # Восстанавливаем .env
+  if [[ -f /tmp/telphin-env-backup ]]; then
+    log_info "Восстанавливаю .env из бэкапа..."
+    cp /tmp/telphin-env-backup "${INSTALL_DIR}/.env"
+    rm /tmp/telphin-env-backup
+  fi
 fi
 
-# Клонируем
-git clone "${REPO_URL}" "${INSTALL_DIR}"
-cd "${INSTALL_DIR}"
-log_ok "Репозиторий склонирован в ${INSTALL_DIR}"
-
-# Восстанавливаем .env
-if [[ -f /tmp/telphin-env-backup ]]; then
-  log_info "Восстанавливаю .env из бэкапа..."
-  cp /tmp/telphin-env-backup "${INSTALL_DIR}/.env"
-  rm /tmp/telphin-env-backup
-fi
+log_ok "Код получен: ${INSTALL_DIR}"
 
 # ─── Шаг 3: Установка зависимостей ────────────────────────────────────────────
 section "3. Установка npm-зависимостей"
