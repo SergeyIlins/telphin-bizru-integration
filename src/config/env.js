@@ -27,6 +27,7 @@ module.exports = {
   // Сервер
   PORT: parseInt(process.env.PORT, 10) || 3000,
   NODE_ENV: process.env.NODE_ENV || 'development',
+  WEBHOOK_DOMAIN: process.env.WEBHOOK_DOMAIN || 'https://dev.sevendoors.ru',
 
   // Бизнес.Ру
   BIZRU_ACCOUNT: process.env.BIZRU_ACCOUNT,
