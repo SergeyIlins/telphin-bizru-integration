@@ -1,8 +1,6 @@
 #!/bin/bash
 # =============================================================================
 # install.sh — Деплой интеграции Телфин + Бизнес.Ру
-# 
-# Схема: git clone → npm install → получение токена → запуск → тесты
 # =============================================================================
 
 set -euo pipefail
@@ -12,6 +10,7 @@ PROJECT_NAME="telphin-integration"
 INSTALL_DIR="/opt/${PROJECT_NAME}"
 NODE_MIN_VERSION="18"
 PM2_APP_NAME="telphin-integration"
+LOG_DIR="${INSTALL_DIR}/logs"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -36,8 +35,6 @@ section "1. Проверка системных зависимостей"
 
 if ! command -v node &> /dev/null; then
   log_err "Node.js не установлен"
-  echo "   curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -"
-  echo "   sudo apt-get install -y nodejs"
   exit 1
 fi
 
@@ -71,20 +68,50 @@ if ! command -v curl &> /dev/null; then
   apt-get install -y -qq curl
 fi
 
-# ─── Шаг 2: Клонирование ─────────────────────────────────────────────────────
-section "2. Клонирование репозитория"
+# ─── Шаг 2: Получение кода ───────────────────────────────────────────────────
+section "2. Получение кода"
 
 pm2 delete "${PM2_APP_NAME}" 2>/dev/null || true
 
-if [[ -d "${INSTALL_DIR}" ]]; then
-  rm -rf "${INSTALL_DIR}"
+CURRENT_DIR=$(pwd)
+IS_INSIDE_REPO=false
+
+if [[ -d "${CURRENT_DIR}/.git" ]] && git remote -v 2>/dev/null | grep -q "SergeyIlins/telphin-bizru-integration"; then
+  IS_INSIDE_REPO=true
+  INSTALL_DIR="${CURRENT_DIR}"
+  log_info "Обнаружен локальный репозиторий, обновляю через git pull..."
+  git pull origin main
+elif [[ -d "${INSTALL_DIR}/.git" ]]; then
+  IS_INSIDE_REPO=true
+  INSTALL_DIR="${INSTALL_DIR}"
+  log_info "Обнаружен репозиторий в ${INSTALL_DIR}, обновляю..."
+  cd "${INSTALL_DIR}"
+  git pull origin main
+else
+  log_info "Клонирование из GitHub..."
+
+  if [[ -f "${INSTALL_DIR}/.env" ]]; then
+    log_info "Сохраняю .env..."
+    cp "${INSTALL_DIR}/.env" /tmp/telphin-env-backup
+  fi
+
+  if [[ -d "${INSTALL_DIR}" ]] && [[ "${CURRENT_DIR}" != "${INSTALL_DIR}"* ]]; then
+    rm -rf "${INSTALL_DIR}"
+  fi
+
+  git clone "${REPO_URL}" "${INSTALL_DIR}"
+  cd "${INSTALL_DIR}"
+
+  if [[ -f /tmp/telphin-env-backup ]]; then
+    log_info "Восстанавливаю .env из бэкапа..."
+    cp /tmp/telphin-env-backup "${INSTALL_DIR}/.env"
+    rm /tmp/telphin-env-backup
+  fi
 fi
 
-git clone "${REPO_URL}" "${INSTALL_DIR}"
-cd "${INSTALL_DIR}"
-log_ok "Репозиторий склонирован"
+log_ok "Код получен: ${INSTALL_DIR}"
 
-# ─── Шаг 3: Установка зависимостей ───────────────────────────────────────────
+# ─── Шаг 3: Установка зависимостей ────────────────────────────────────────────
 section "3. Установка npm-зависимостей"
 
 npm ci --production --silent || {
@@ -93,53 +120,41 @@ npm ci --production --silent || {
 }
 log_ok "Зависимости установлены"
 
-# ─── Шаг 4: Создание .env ────────────────────────────────────────────────────
-section "4. Настройка конфигурации"
+# ─── Шаг 4: Настройка .env ────────────────────────────────────────────────────
+section "4. Проверка конфигурации .env"
 
-cp .env.example .env
-chmod 600 .env
-log_ok ".env создан из шаблона (секреты уже встроены)"
-
-# ─── Шаг 5: Получение токена Бизнес.Ру ────────────────────────────────────────
-section "5. Получение токена Бизнес.Ру"
-
-log_info "Запрашиваю токен через repair.json..."
-TOKEN_RESPONSE=$(curl -s --max-time 15 "https://sevendoors.business.ru/api/rest/repair.json?app_id=238360&app_psw=$(echo -n 'fOzjt3skalowLRhNvE3QDze3y7UBo2LAapp_id=238360' | md5sum | cut -d' ' -f1)" || echo "")
-
-TOKEN=$(echo "$TOKEN_RESPONSE" | grep -o '"token":"[^"]*"' | cut -d'"' -f4 || echo "")
-
-if [[ -n "$TOKEN" ]]; then
-  echo "BIZRU_TOKEN=$TOKEN" >> .env
-  log_ok "Токен получен и сохранён в .env"
-else
-  log_warn "Не удалось получить токен автоматически"
-  echo ""
-  echo "   Получите вручную:"
-  echo "   curl \"https://sevendoors.business.ru/api/rest/repair.json?app_id=238360&app_psw=0ae6ea74c25f399eba6c920afd03cf6a\""
-  echo ""
-  echo "   Затем добавьте в .env:"
-  echo "   echo 'BIZRU_TOKEN=ВАШ_ТОКЕН' >> /opt/telphin-integration/.env"
-  echo ""
-  echo "   И перезапустите:"
-  echo "   pm2 restart telphin-integration"
+# Если .env нет — копируем из .env.example (в котором уже реальные секреты)
+if [[ ! -f "${INSTALL_DIR}/.env" ]]; then
+  log_info ".env не найден, создаю из .env.example (секреты уже встроены)..."
+  cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
 fi
 
-# ─── Шаг 6: Запуск ───────────────────────────────────────────────────────────
-section "6. Запуск приложения"
+chmod 600 "${INSTALL_DIR}/.env"
+log_ok ".env настроен"
 
-mkdir -p logs
+# ─── Шаг 5: Создание директорий ─────────────────────────────────────────────
+section "5. Создание вспомогательных директорий"
+
+mkdir -p "${LOG_DIR}"
+chown -R "$(whoami):$(whoami)" "${INSTALL_DIR}" 2>/dev/null || true
+log_ok "Директории созданы"
+
+# ─── Шаг 6: Запуск приложения ─────────────────────────────────────────────────
+section "6. Запуск приложения (PM2)"
+
 pm2 start ecosystem.config.js
 pm2 save
+
 sleep 3
 
-# ─── Шаг 7: Авто-тестирование ───────────────────────────────────────────────
+# ─── Шаг 7: Авто-тестирование ─────────────────────────────────────────────────
 section "7. Авто-тестирование"
 
 TEST_PASSED=0
 TEST_FAILED=0
 
 # Тест 1: Health check
-log_info "Тест 1: Health check..."
+log_info "Тест 1: Health check (GET /health)..."
 HEALTH=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:3000/health || echo "000")
 if [[ "$HEALTH" == "200" ]]; then
   log_ok "Health check: OK"
@@ -149,11 +164,37 @@ else
   ((TEST_FAILED++))
 fi
 
-# Тест 2: Вебхук
-log_info "Тест 2: Тестовый вебхук..."
-WEBHOOK_RESULT=$(curl -s -X POST http://localhost:3000/test/webhook \
-  -H "Content-Type: application/json" \
-  -d '{"CallStatus":"dial-in","CallerIDNum":"79161234567","CalledNumber":"15657*101","CallID":"test-'$(date +%s)'"}' | grep -o '"success":true' || echo "FAIL")
+# Тест 2: Проверка авторизации Бизнес.Ру
+log_info "Тест 2: Авторизация Бизнес.Ру..."
+node -e "
+const bizru = require('./src/services/bizru');
+bizru.authenticate()
+  .then(() => { console.log('${GREEN}✅ Бизнес.Ру авторизация: OK${NC}'); process.exit(0); })
+  .catch(err => { console.log('${RED}❌ Бизнес.Ру авторизация: FAIL${NC}', err.message); process.exit(1); });
+" && ((TEST_PASSED++)) || ((TEST_FAILED++))
+
+# Тест 3: Загрузка сотрудников
+log_info "Тест 3: Загрузка сотрудников..."
+node -e "
+const bizru = require('./src/services/bizru');
+const mapper = require('./src/config/employees');
+bizru.getEmployees()
+  .then(employees => {
+    const configured = mapper.getAll();
+    console.log('${GREEN}✅ Сотрудники: OK${NC} (загружено ' + (Array.isArray(employees) ? employees.length : 'N/A') + ', настроено ' + configured.length + ')');
+    process.exit(0);
+  })
+  .catch(err => { console.log('${RED}❌ Сотрудники: FAIL${NC}', err.message); process.exit(1); });
+" && ((TEST_PASSED++)) || ((TEST_FAILED++))
+
+# Тест 4: Тестовый вебхук
+log_info "Тест 4: Обработка тестового вебхука..."
+WEBHOOK_RESULT=$(curl -s -X POST http://localhost:3000/test/webhook   -H "Content-Type: application/json"   -d '{
+    "CallStatus": "dial-in",
+    "CallerIDNum": "79161234567",
+    "CalledNumber": "15657*101",
+    "CallID": "test-auto-"'"'"$(date +%s)"'"'"
+  }' | grep -o '"success":true' || echo "FAIL")
 
 if [[ "$WEBHOOK_RESULT" == '"success":true' ]]; then
   log_ok "Вебхук: OK"
@@ -163,39 +204,47 @@ else
   ((TEST_FAILED++))
 fi
 
-# Тест 3: Авторизация Бизнес.Ру
-log_info "Тест 3: Авторизация Бизнес.Ру..."
-node -e "
-const bizru = require('./src/services/bizru');
-bizru.ensureToken()
-  .then(() => { console.log('${GREEN}✅ Бизнес.Ру: токен работает${NC}'); process.exit(0); })
-  .catch(err => { console.log('${RED}❌ Бизнес.Ру: FAIL${NC}', err.message); process.exit(1); });
-" && ((TEST_PASSED++)) || ((TEST_FAILED++))
-
-# ─── Итоги ──────────────────────────────────────────────────────────────────
+# ─── Итоги ────────────────────────────────────────────────────────────────────
 section "8. Итоги деплоя"
 
 echo ""
 echo "┌─────────────────────────────────────────────────────────────┐"
 echo "│                    РЕЗУЛЬТАТЫ ТЕСТОВ                         │"
 echo "├─────────────────────────────────────────────────────────────┤"
-printf "│  ✅ Пройдено:  %-3d                                          │\\n" "$TEST_PASSED"
-printf "│  ❌ Ошибок:    %-3d                                          │\\n" "$TEST_FAILED"
+printf "│  ✅ Пройдено:  %-3d                                          │\n" "$TEST_PASSED"
+printf "│  ❌ Ошибок:    %-3d                                          │\n" "$TEST_FAILED"
 echo "└─────────────────────────────────────────────────────────────┘"
 echo ""
 
 if [[ "$TEST_FAILED" -gt 0 ]]; then
-  log_warn "Деплой завершён с ошибками"
+  log_err "Деплой завершён с ошибками!"
   echo ""
-  echo "📋 Логи:"
+  echo "📋 Логи для диагностики:"
   echo "   pm2 logs ${PM2_APP_NAME} --lines 50"
-  echo ""
+  echo "   cat ${LOG_DIR}/out.log"
+  echo "   cat ${LOG_DIR}/err.log"
+  exit 1
 fi
 
-log_ok "Установка завершена!"
+log_ok "Все тесты пройдены! Деплой успешен."
 echo ""
-echo "  📁 Директория:  ${INSTALL_DIR}"
-echo "  🔍 Health:      curl http://localhost:3000/health"
-echo "  📞 Вебхук:      POST http://localhost:3000/webhook/telphin"
-echo "  📜 Логи:        pm2 logs ${PM2_APP_NAME}"
+echo "═══════════════════════════════════════════════════════════════"
+echo "  🚀 ПРИЛОЖЕНИЕ ЗАПУЩЕНО"
+echo "═══════════════════════════════════════════════════════════════"
+echo ""
+echo "  📁 Директория:    ${INSTALL_DIR}"
+echo "  📋 Конфигурация:   ${INSTALL_DIR}/.env"
+echo "  📜 Логи PM2:      pm2 logs ${PM2_APP_NAME}"
+echo "  🔍 Health:        curl http://localhost:3000/health"
+echo "  📞 Вебхук:        POST https://your-domain.com/webhook/telphin"
+echo ""
+echo "  Полезные команды:"
+echo "    pm2 status              — статус процессов"
+echo "    pm2 logs ${PM2_APP_NAME}     — логи в реальном времени"
+echo "    pm2 restart ${PM2_APP_NAME}  — перезапуск"
+echo "    pm2 stop ${PM2_APP_NAME}     — остановка"
+echo ""
+echo "  Автозапуск при ребуте:"
+echo "    pm2 startup systemd"
+echo "    pm2 save"
 echo ""
