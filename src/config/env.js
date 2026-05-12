@@ -33,6 +33,7 @@ module.exports = {
   BIZRU_APP_ID: process.env.BIZRU_APP_ID,
   BIZRU_SECRET_KEY: process.env.BIZRU_SECRET_KEY,
   BIZRU_DOMAIN: process.env.BIZRU_DOMAIN || `https://${process.env.BIZRU_ACCOUNT}.business.ru`,
+  BIZRU_TOKEN: process.env.BIZRU_TOKEN || null,
 
   // Телфин
   TELPHIN_APP_ID: process.env.TELPHIN_APP_ID,

@@ -1,14 +1,10 @@
 #!/bin/bash
 # =============================================================================
 # install.sh — Деплой интеграции Телфин + Бизнес.Ру
-# 
-# Схема: GitHub → сервер → PM2
-# Авто-тестирование после установки
 # =============================================================================
 
 set -euo pipefail
 
-# ─── Конфигурация ─────────────────────────────────────────────────────────────
 REPO_URL="https://github.com/SergeyIlins/telphin-bizru-integration.git"
 PROJECT_NAME="telphin-integration"
 INSTALL_DIR="/opt/${PROJECT_NAME}"
@@ -16,14 +12,12 @@ NODE_MIN_VERSION="18"
 PM2_APP_NAME="telphin-integration"
 LOG_DIR="${INSTALL_DIR}/logs"
 
-# Цвета
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# ─── Утилиты ──────────────────────────────────────────────────────────────────
 log_info()  { echo -e "${BLUE}ℹ️  $1${NC}"; }
 log_ok()    { echo -e "${GREEN}✅ $1${NC}"; }
 log_warn()  { echo -e "${YELLOW}⚠️  $1${NC}"; }
@@ -39,11 +33,8 @@ section() {
 # ─── Шаг 1: Проверка системы ─────────────────────────────────────────────────
 section "1. Проверка системных зависимостей"
 
-# Node.js
 if ! command -v node &> /dev/null; then
   log_err "Node.js не установлен"
-  echo "   Установите: curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -"
-  echo "                sudo apt-get install -y nodejs"
   exit 1
 fi
 
@@ -54,28 +45,24 @@ if [[ "$NODE_VERSION" -lt "$NODE_MIN_VERSION" ]]; then
 fi
 log_ok "Node.js $(node -v)"
 
-# npm
 if ! command -v npm &> /dev/null; then
   log_err "npm не установлен"
   exit 1
 fi
 log_ok "npm $(npm -v)"
 
-# git
 if ! command -v git &> /dev/null; then
   log_warn "git не найден, устанавливаю..."
   apt-get update -qq && apt-get install -y -qq git
 fi
 log_ok "git $(git --version | awk '{print $3}')"
 
-# PM2
 if ! command -v pm2 &> /dev/null; then
   log_warn "PM2 не найден, устанавливаю..."
   npm install -g pm2@latest
 fi
 log_ok "PM2 $(pm2 -v)"
 
-# curl (для тестов)
 if ! command -v curl &> /dev/null; then
   log_warn "curl не найден, устанавливаю..."
   apt-get install -y -qq curl
@@ -84,10 +71,8 @@ fi
 # ─── Шаг 2: Получение кода ───────────────────────────────────────────────────
 section "2. Получение кода"
 
-# Останавливаем старый процесс
 pm2 delete "${PM2_APP_NAME}" 2>/dev/null || true
 
-# Проверяем, запущены ли мы уже изнутри репозитория
 CURRENT_DIR=$(pwd)
 IS_INSIDE_REPO=false
 
@@ -103,25 +88,20 @@ elif [[ -d "${INSTALL_DIR}/.git" ]]; then
   cd "${INSTALL_DIR}"
   git pull origin main
 else
-  # Чистая установка — клонируем
   log_info "Клонирование из GitHub..."
 
-  # Сохраняем .env если есть
   if [[ -f "${INSTALL_DIR}/.env" ]]; then
     log_info "Сохраняю .env..."
     cp "${INSTALL_DIR}/.env" /tmp/telphin-env-backup
   fi
 
-  # Удаляем старую директорию (только если мы НЕ внутри неё)
   if [[ -d "${INSTALL_DIR}" ]] && [[ "${CURRENT_DIR}" != "${INSTALL_DIR}"* ]]; then
     rm -rf "${INSTALL_DIR}"
   fi
 
-  # Клонируем
   git clone "${REPO_URL}" "${INSTALL_DIR}"
   cd "${INSTALL_DIR}"
 
-  # Восстанавливаем .env
   if [[ -f /tmp/telphin-env-backup ]]; then
     log_info "Восстанавливаю .env из бэкапа..."
     cp /tmp/telphin-env-backup "${INSTALL_DIR}/.env"
@@ -143,23 +123,10 @@ log_ok "Зависимости установлены"
 # ─── Шаг 4: Настройка .env ────────────────────────────────────────────────────
 section "4. Проверка конфигурации .env"
 
+# Если .env нет — копируем из .env.example (в котором уже реальные секреты)
 if [[ ! -f "${INSTALL_DIR}/.env" ]]; then
-  log_warn ".env не найден, создаю из шаблона..."
+  log_info ".env не найден, создаю из .env.example (секреты уже встроены)..."
   cp "${INSTALL_DIR}/.env.example" "${INSTALL_DIR}/.env"
-  log_err "⚠️  ОБЯЗАТЕЛЬНО отредактируйте ${INSTALL_DIR}/.env перед запуском!"
-  echo "   nano ${INSTALL_DIR}/.env"
-  echo ""
-  echo "   Ключевые поля:"
-  echo "     BIZRU_SECRET_KEY=..."
-  echo "     TELPHIN_APP_SECRET=..."
-  echo "     EMPLOYEE_15657_101=75574|Имя"
-  exit 1
-fi
-
-# Проверяем, что не остались дефолтные значения
-if grep -q "fOzjt3skalowLRhNvE3QDze3y7UBo2LA" "${INSTALL_DIR}/.env"; then
-  log_err "В .env остались дефолтные секреты! Отредактируйте файл."
-  exit 1
 fi
 
 chmod 600 "${INSTALL_DIR}/.env"
@@ -178,7 +145,6 @@ section "6. Запуск приложения (PM2)"
 pm2 start ecosystem.config.js
 pm2 save
 
-# Ждём запуска
 sleep 3
 
 # ─── Шаг 7: Авто-тестирование ─────────────────────────────────────────────────
@@ -238,7 +204,7 @@ else
   ((TEST_FAILED++))
 fi
 
-# ─── Итоги тестирования ───────────────────────────────────────────────────────
+# ─── Итоги ────────────────────────────────────────────────────────────────────
 section "8. Итоги деплоя"
 
 echo ""

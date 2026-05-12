@@ -1,13 +1,6 @@
 /**
  * API-клиент Бизнес.Ру
- * Авторизация: token + MD5-подпись
- * Домен: {account}.business.ru
- * 
- * ИСПРАВЛЕНО по документации:
- * - Создание сделки: POST с JSON-объектом deal={...}
- * - Поле ответственного: responsible_user (не responsible_employee_id)
- * - Поле клиента: customer_id (не contact_id)
- * - Название сделки: title (не name)
+ * Авторизация: токен из .env или repair.json (один раз)
  */
 
 const axios = require('axios');
@@ -16,19 +9,41 @@ const env = require('../config/env');
 
 class BizruAPI {
   constructor() {
-    this.token = null;
-    this.tokenExpiry = null;
+    this.token = env.BIZRU_TOKEN || null;
+    this.tokenIssuedAt = null;
+    this.tokenTTL = 3600;
     this.baseURL = env.BIZRU_DOMAIN;
-    this.account = env.BIZRU_ACCOUNT;
     this.appId = env.BIZRU_APP_ID;
     this.secret = env.BIZRU_SECRET_KEY;
+    this.authPromise = null;
   }
 
   /**
-   * Получить токен через repair.json
-   * Подпись: MD5(secret_key + app_id=...)
+   * Получить токен через repair.json (только если нет в .env)
+   * Singleton: параллельные вызовы ждут одну авторизацию
    */
   async authenticate() {
+    // Если токен уже есть из .env — используем его
+    if (this.token) {
+      console.log('✅ Бизнес.Ру: используем токен из .env');
+      this.tokenIssuedAt = Date.now();
+      return this.token;
+    }
+
+    // Если авторизация уже идёт — ждём её
+    if (this.authPromise) {
+      return this.authPromise;
+    }
+
+    // Создаём promise авторизации
+    this.authPromise = this._doAuthenticate().finally(() => {
+      this.authPromise = null;
+    });
+
+    return this.authPromise;
+  }
+
+  async _doAuthenticate() {
     const sign = crypto
       .createHash('md5')
       .update(this.secret + `app_id=${this.appId}`)
@@ -39,18 +54,26 @@ class BizruAPI {
     try {
       const { data } = await axios.get(url, {
         params: { app_id: this.appId, app_psw: sign },
-        timeout: 10000
+        timeout: 15000
       });
 
-      if (data.status !== 'success' || !data.result?.token) {
+      let token = null;
+
+      if (data.token) {
+        token = data.token;
+      } else if (data.result && data.result.token) {
+        token = data.result.token;
+      }
+
+      if (!token) {
         throw new Error(`Auth failed: ${JSON.stringify(data)}`);
       }
 
-      this.token = data.result.token;
-      // Токен живёт ~2 часа
-      this.tokenExpiry = Date.now() + 90 * 60 * 1000;
+      this.token = token;
+      this.tokenIssuedAt = Date.now();
 
-      console.log('✅ Бизнес.Ру: токен получен');
+      console.log('✅ Бизнес.Ру: токен получен через repair.json');
+      console.log(`   💡 Сохраните в .env: BIZRU_TOKEN=${token}`);
       return this.token;
     } catch (err) {
       console.error('❌ Ошибка авторизации Бизнес.Ру:', err.message);
@@ -59,19 +82,27 @@ class BizruAPI {
   }
 
   /**
-   * Проверить и обновить токен
+   * Проверить, что токен ещё валиден (с запасом 10 минут)
+   */
+  isTokenValid() {
+    if (!this.token || !this.tokenIssuedAt) return false;
+    const age = (Date.now() - this.tokenIssuedAt) / 1000;
+    return age < (this.tokenTTL - 600);
+  }
+
+  /**
+   * Убедиться, что токен есть
    */
   async ensureToken() {
-    if (!this.token || Date.now() >= this.tokenExpiry) {
-      await this.authenticate();
+    if (this.isTokenValid()) {
+      return this.token;
     }
-    return this.token;
+    return this.authenticate();
   }
 
   /**
    * Вычислить подпись для рабочих запросов
    * MD5(token + secret + sorted_params)
-   * Параметры сортируются по ключам
    */
   getSignature(params = {}) {
     const sorted = Object.keys(params)
@@ -86,10 +117,9 @@ class BizruAPI {
   }
 
   /**
-   * Базовый запрос к API
-   * Бизнес.Ру принимает JSON в теле POST-запроса
+   * Базовый запрос к API с ретраями
    */
-  async request(action, params = {}, method = 'GET') {
+  async request(action, params = {}, method = 'GET', retries = 3) {
     await this.ensureToken();
 
     const allParams = {
@@ -103,7 +133,7 @@ class BizruAPI {
     const config = {
       method,
       url,
-      timeout: 15000,
+      timeout: 20000,
       headers: {
         'Content-Type': 'application/x-www-form-urlencoded'
       }
@@ -112,11 +142,9 @@ class BizruAPI {
     if (method === 'GET') {
       config.params = { ...allParams, app_psw: sign };
     } else {
-      // POST/PUT: формируем form-data (как требует Бизнес.Ру)
       const formData = new URLSearchParams();
       Object.entries({ ...allParams, app_psw: sign }).forEach(([k, v]) => {
         if (v !== null && v !== undefined) {
-          // Для вложенных объектов (deal={...}) — сериализуем в JSON
           if (typeof v === 'object') {
             formData.append(k, JSON.stringify(v));
           } else {
@@ -136,29 +164,31 @@ class BizruAPI {
 
       return data.result || data;
     } catch (err) {
-      // Если 401 — пробуем переавторизоваться один раз
+      // 503 — сервер перегружен, пробуем ещё раз через 3 секунды
+      if (err.response?.status === 503 && retries > 0) {
+        console.warn(`⚠️ 503 от Бизнес.Ру, ретрай через 3 сек... (${retries} осталось)`);
+        await new Promise(r => setTimeout(r, 3000));
+        return this.request(action, params, method, retries - 1);
+      }
+
+      // 401 — токен протух, обновляем один раз
       if (err.response?.status === 401 && !err._retried) {
         err._retried = true;
         this.token = null;
-        return this.request(action, params, method);
+        this.tokenIssuedAt = null;
+        return this.request(action, params, method, retries);
       }
+
       throw err;
     }
   }
 
   // === Методы API ===
 
-  /**
-   * Получить список сотрудников
-   */
   async getEmployees() {
     return this.request('employees');
   }
 
-  /**
-   * Найти клиента по номеру телефона
-   * Используем contacts.json с поиском по phone
-   */
   async findContactByPhone(phone) {
     const clean = phone.replace(/\D/g, '');
 
@@ -168,7 +198,6 @@ class BizruAPI {
         limit: 1
       });
 
-      // Ответ может быть объектом или массивом
       if (Array.isArray(result)) {
         return result.length > 0 ? result[0] : null;
       }
@@ -182,58 +211,33 @@ class BizruAPI {
     }
   }
 
-  /**
-   * Создать сделку
-   * 
-   * ИСПРАВЛЕНО по документации Бизнес.Ру:
-   * - deal — объект с полями сделки
-   * - title — название сделки
-   * - responsible_user — ID ответственного
-   * - customer_id — ID клиента
-   * - status — статус: new, in_progress, decision, payment, success, canceled
-   * 
-   * @param {object} data — поля сделки
-   */
   async createDeal(data) {
-    // Формируем объект deal по документации
     const dealObj = {
       title: data.title,
       responsible_user: data.responsible_user,
       status: data.status || 'new'
     };
 
-    // Добавляем опциональные поля
     if (data.customer_id) {
       dealObj.customer_id = data.customer_id;
     }
     if (data.budget) {
       dealObj.budget = data.budget;
     }
-    if (data.currency) {
-      dealObj.currency = data.currency;
-    }
 
     return this.request('deals', { deal: dealObj }, 'POST');
   }
 
-  /**
-   * Обновить сделку
-   */
   async updateDeal(dealId, data) {
     const dealObj = {};
 
     if (data.title) dealObj.title = data.title;
     if (data.status) dealObj.status = data.status;
     if (data.responsible_user) dealObj.responsible_user = data.responsible_user;
-    if (data.budget) dealObj.budget = data.budget;
 
     return this.request(`deals/${dealId}`, { deal: dealObj }, 'PUT');
   }
 
-  /**
-   * Отправить уведомление сотруднику
-   * Формат: employee_ids[0]=ID (не JSON-массив!)
-   */
   async sendNotification(employeeId, message) {
     const params = {
       'employee_ids[0]': employeeId,

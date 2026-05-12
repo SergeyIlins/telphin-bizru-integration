@@ -1,10 +1,5 @@
 /**
  * Основной сервер интеграции Телфин + Бизнес.Ру
- * 
- * ИСПРАВЛЕНО:
- * - Добавлен обработчик SIGTERM/SIGINT для graceful shutdown
- * - Rate limiter с правильными заголовками
- * - Обработка ошибок при старте с retry
  */
 
 const express = require('express');
@@ -49,14 +44,12 @@ app.post('/webhook/telphin', webhookLimiter, webhookAuth, async (req, res) => {
 
     const result = await dealManager.handleCall(req.body);
 
-    // Важно: отвечаем быстро, Телфин ждёт 200 OK
     res.status(200).json({
       success: true,
       ...result
     });
 
   } catch (err) {
-    // Даже при ошибке отвечаем 200, иначе Телфин будет ретраить
     console.error('❌ Ошибка обработки вебхука:', err.message);
     res.status(200).json({
       success: false,
@@ -65,7 +58,7 @@ app.post('/webhook/telphin', webhookLimiter, webhookAuth, async (req, res) => {
   }
 });
 
-// === Тестовый эндпоинт (для ручной проверки) ===
+// === Тестовый эндпоинт ===
 app.post('/test/webhook', async (req, res) => {
   try {
     const result = await dealManager.handleCall(req.body);
@@ -103,20 +96,14 @@ async function start() {
   console.log('\n🚀 Запуск интеграции Телфин + Бизнес.Ру\n');
 
   try {
-    // 1. Авторизация в Бизнес.Ру
-    console.log('⏳ Авторизация в Бизнес.Ру...');
-    await bizru.authenticate();
+    // Проверяем токен (если есть в .env — используем, иначе получаем через repair.json)
+    console.log('⏳ Проверка авторизации Бизнес.Ру...');
+    await bizru.ensureToken();
 
-    // 2. Загрузка сотрудников
-    console.log('⏳ Загрузка сотрудников...');
-    const employees = await bizru.getEmployees();
-    console.log(`✅ Загружено сотрудников: ${Array.isArray(employees) ? employees.length : 'N/A'}`);
-
-    // 3. Запуск сервера
     server = app.listen(env.PORT, () => {
       console.log(`\n✅ Сервер запущен на порту ${env.PORT}`);
-      console.log(`📡 Вебхук Телфин: POST https://your-domain.com/webhook/telphin`);
-      console.log(`🔍 Health check:  http://localhost:${env.PORT}/health`);
+      console.log(`📡 Вебхук Телфин:  POST https://your-domain.com/webhook/telphin`);
+      console.log(`🔍 Health check:   http://localhost:${env.PORT}/health`);
       console.log(`\n📋 Настроенные сотрудники:`);
       const mapper = require('./config/employees');
       mapper.getAll().forEach(e => {
@@ -144,7 +131,6 @@ function shutdown(signal) {
         process.exit(0);
       });
 
-      // Форсированное завершение через 5 секунд
       setTimeout(() => {
         console.error('⚠️ Принудительное завершение');
         process.exit(1);
@@ -158,7 +144,6 @@ function shutdown(signal) {
 process.on('SIGTERM', shutdown('SIGTERM'));
 process.on('SIGINT', shutdown('SIGINT'));
 
-// Необработанные ошибки
 process.on('uncaughtException', (err) => {
   console.error('💥 Uncaught Exception:', err);
   shutdown('uncaughtException')();
@@ -168,5 +153,4 @@ process.on('unhandledRejection', (reason, promise) => {
   console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
 });
 
-// Запуск
 start();
