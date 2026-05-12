@@ -1,6 +1,6 @@
 /**
  * API-клиент Бизнес.Ру
- * Токен получается ОДИН РАЗ и кэшируется на 50 минут
+ * Токен берётся из .env (BIZRU_TOKEN) — repair.json НЕ используется
  */
 
 const axios = require('axios');
@@ -10,80 +10,36 @@ const env = require('../config/env');
 class BizruAPI {
   constructor() {
     this.token = env.BIZRU_TOKEN || null;
-    this.tokenIssuedAt = null;
-    this.tokenTTL = 3600;
+    this.tokenIssuedAt = Date.now(); // считаем, что токен свежий при старте
     this.baseURL = env.BIZRU_DOMAIN;
     this.appId = env.BIZRU_APP_ID;
     this.secret = env.BIZRU_SECRET_KEY;
-    this.authPromise = null;
   }
 
   /**
    * Проверить валидность токена (запас 10 минут)
    */
   isTokenValid() {
-    if (!this.token || !this.tokenIssuedAt) return false;
+    if (!this.token) return false;
     const ageSec = (Date.now() - this.tokenIssuedAt) / 1000;
-    return ageSec < (this.tokenTTL - 600);
+    return ageSec < 3000; // 50 минут (токен живёт 60)
   }
 
   /**
-   * Убедиться, что токен есть. 
-   * Если есть в .env — используем. Если нет — получаем через repair.json (1 раз)
+   * Убедиться, что токен есть
    */
   async ensureToken() {
-    // Токен свежий — просто возвращаем
-    if (this.isTokenValid()) {
-      return this.token;
+    if (!this.token) {
+      throw new Error('BIZRU_TOKEN не задан в .env');
     }
-
-    // Если авторизация уже идёт — ждём
-    if (this.authPromise) {
-      return this.authPromise;
+    if (!this.isTokenValid()) {
+      console.warn('⚠️ Токен возможно протух, но продолжаем...');
     }
-
-    // Если токен есть из .env, но ещё не инициализирован
-    if (this.token && !this.tokenIssuedAt) {
-      this.tokenIssuedAt = Date.now();
-      console.log('✅ Бизнес.Ру: используем токен из .env');
-      return this.token;
-    }
-
-    // Получаем через repair.json (singleton — параллельные запросы ждут)
-    this.authPromise = this._fetchToken().finally(() => {
-      this.authPromise = null;
-    });
-    return this.authPromise;
-  }
-
-  async _fetchToken() {
-    const sign = crypto
-      .createHash('md5')
-      .update(this.secret + `app_id=${this.appId}`)
-      .digest('hex');
-
-    try {
-      const { data } = await axios.get(`${this.baseURL}/api/rest/repair.json`, {
-        params: { app_id: this.appId, app_psw: sign },
-        timeout: 15000
-      });
-
-      const token = data.token || (data.result && data.result.token);
-      if (!token) throw new Error('No token in response');
-
-      this.token = token;
-      this.tokenIssuedAt = Date.now();
-      console.log('✅ Бизнес.Ру: токен получен через repair.json');
-      console.log(`   💡 Добавьте в .env: BIZRU_TOKEN=${token}`);
-      return token;
-    } catch (err) {
-      console.error('❌ Ошибка авторизации:', err.message);
-      throw err;
-    }
+    return this.token;
   }
 
   /**
-   * Подпись запроса: MD5(token + secret + sorted_params)
+   * Подпись запроса: md5(token + secret + sorted_params)
    */
   getSignature(params = {}) {
     const sorted = Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('');
@@ -91,9 +47,9 @@ class BizruAPI {
   }
 
   /**
-   * Базовый запрос с ретраями
+   * Базовый запрос с ретраями (только при 503, не при 401)
    */
-  async request(action, params = {}, method = 'GET', retries = 3) {
+  async request(action, params = {}, method = 'GET', retries = 2) {
     await this.ensureToken();
 
     const allParams = { app_id: this.appId, ...params };
@@ -101,7 +57,7 @@ class BizruAPI {
     const url = `${this.baseURL}/api/rest/${action}.json`;
 
     const config = {
-      method, url, timeout: 20000,
+      method, url, timeout: 15000,
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
     };
 
@@ -120,15 +76,11 @@ class BizruAPI {
       if (data.status === 'error') throw new Error(data.error || 'API error');
       return data.result || data;
     } catch (err) {
+      // 503 — сервер перегружен, ретрай через 5 сек
       if (err.response?.status === 503 && retries > 0) {
-        await new Promise(r => setTimeout(r, 3000));
+        console.warn(`⚠️ 503, ретрай через 5 сек... (${retries})`);
+        await new Promise(r => setTimeout(r, 5000));
         return this.request(action, params, method, retries - 1);
-      }
-      if (err.response?.status === 401 && !err._retried) {
-        err._retried = true;
-        this.token = null;
-        this.tokenIssuedAt = null;
-        return this.request(action, params, method, retries);
       }
       throw err;
     }
@@ -154,13 +106,6 @@ class BizruAPI {
     };
     if (data.customer_id) dealObj.customer_id = data.customer_id;
     return this.request('deals', { deal: dealObj }, 'POST');
-  }
-
-  async updateDeal(dealId, data) {
-    const dealObj = {};
-    if (data.title) dealObj.title = data.title;
-    if (data.status) dealObj.status = data.status;
-    return this.request(`deals/${dealId}`, { deal: dealObj }, 'PUT');
   }
 
   async sendNotification(employeeId, message) {
