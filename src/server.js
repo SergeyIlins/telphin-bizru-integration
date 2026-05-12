@@ -13,6 +13,9 @@ const errorHandler = require('./middleware/errorHandler');
 
 const app = express();
 
+// Домен для вебхука (из .env или дефолт)
+const WEBHOOK_DOMAIN = env.WEBHOOK_DOMAIN || 'https://dev.sevendoors.ru';
+
 // === Middleware ===
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
@@ -102,7 +105,7 @@ async function start() {
 
     server = app.listen(env.PORT, () => {
       console.log(`\n✅ Сервер запущен на порту ${env.PORT}`);
-      console.log(`📡 Вебхук Телфин:  POST https://your-domain.com/webhook/telphin`);
+      console.log(`📡 Вебхук Телфин:  POST ${WEBHOOK_DOMAIN}/webhook/telphin`);
       console.log(`🔍 Health check:   http://localhost:${env.PORT}/health`);
       console.log(`\n📋 Настроенные сотрудники:`);
       const mapper = require('./config/employees');
